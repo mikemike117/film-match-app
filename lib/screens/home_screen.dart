@@ -5,6 +5,7 @@ import 'package:film_match_app/providers/movie_provider.dart';
 import 'package:film_match_app/screens/login_screen.dart';
 import 'package:film_match_app/screens/wishlist_screen.dart';
 import 'package:film_match_app/widgets/movie_card.dart';
+import 'package:film_match_app/models/movie.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -234,32 +235,17 @@ class _HomeScreenState extends State<HomeScreen> {
             itemCount: movieProvider.movies.length,
             itemBuilder: (context, index) {
               final movie = movieProvider.movies[index];
-              final bool isMovieLiked = movieProvider.isInWishlist(movie);
+              final bool isInWishlist = movieProvider.wishlist.any((m) => m.id == movie.id);
               return MovieCard(
                 movie: movie,
-                isLiked: isMovieLiked,
-                onLike: () {
-                  if (isMovieLiked) {
-                    movieProvider.removeFromWishlist(movie);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Фильм удален из избранного'),
-                      ),
-                    );
-                  } else {
-                    movieProvider.addToWishlist(movie);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Фильм добавлен в избранное'),
-                      ),
-                    );
-                  }
-                },
-                onDislike: () {
-                  movieProvider.skipMovie(movie);
+                isInWishlist: isInWishlist,
+                onWishlistToggle: () {
+                  movieProvider.toggleWishlist(movie);
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Фильм пропущен'),
+                    SnackBar(
+                      content: Text(isInWishlist
+                          ? 'Фильм удален из избранного'
+                          : 'Фильм добавлен в избранное'),
                     ),
                   );
                 },
@@ -281,4 +267,4 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-}
+} 

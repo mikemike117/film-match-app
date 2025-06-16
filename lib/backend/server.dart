@@ -12,7 +12,7 @@ class BackendServer {
   final DatabaseService _dbService = DatabaseService();
   late final Router _router;
   late final DbCollection _openedLogsCollection; // Добавляем коллекцию для открытых логов
-
+  
   BackendServer() {
     // Initialize Firebase Admin SDK
     FirebaseAdmin.instance.initializeApp(AppOptions(
@@ -60,33 +60,33 @@ class BackendServer {
       return Response.internalServerError(body: 'Authentication error: $e');
     }
   }
-
+  
   Future<void> start() async {
     // Подключаемся к базе данных
     await _dbService.connect();
     _openedLogsCollection = _dbService.getCollection('opened_logs'); // Инициализируем коллекцию
     await _openedLogsCollection.createIndex(keys: {'userId': 1, 'logId': 1}, unique: true); // Создаем индекс
-
+    
     // Создаем конвейер обработчиков с middleware аутентификации
     final handler = Pipeline()
         .addMiddleware(logRequests())
         .addHandler(_authMiddleware); // Применяем middleware аутентификации первым
-
+    
     // Запускаем сервер
     final server = await shelf_io.serve(
       handler,
       InternetAddress.anyIPv4,
       8080,
     );
-
+    
     print('Server running on port ${server.port}');
   }
-
+  
   // Обработчики маршрутов (теперь ожидаем userId из контекста запроса)
   Response _healthCheck(Request request) {
     return Response.ok('Server is running!');
   }
-
+  
   Future<Response> _getWishlist(Request request) async {
     final userId = request.context['userId'] as String?;
     if (userId == null) {
@@ -117,7 +117,7 @@ class BackendServer {
       return Response.internalServerError(body: e.toString());
     }
   }
-
+  
   Future<Response> _addToWishlist(Request request) async {
     final userId = request.context['userId'] as String?;
     if (userId == null) {
@@ -143,7 +143,7 @@ class BackendServer {
       return Response.internalServerError(body: e.toString());
     }
   }
-
+  
   Future<Response> _removeFromWishlist(Request request) async {
     final userId = request.context['userId'] as String?;
     if (userId == null) {
@@ -153,14 +153,14 @@ class BackendServer {
     final movieId = request.params['movieId'];
     if (movieId == null) {
       return Response.badRequest(body: 'Movie ID is required.');
-    }
-
+      }
+      
     try {
       final result = await _dbService.getCollection('wishlists').updateOne(
         where.eq('userId', userId),
         modify.pull('movieIds', {'id': movieId}), // Pull by movie ID within the object
       );
-
+      
       return Response.ok(
         result.toString(),
         headers: {'content-type': 'application/json'},

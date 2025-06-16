@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:film_match_app/providers/movie_provider.dart';
+import '../providers/movie_provider.dart';
+import '../models/movie.dart';
 
 class WishlistScreen extends StatelessWidget {
   const WishlistScreen({super.key});
@@ -9,47 +10,43 @@ class WishlistScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Избранные фильмы'),
+        title: const Text('Избранное'),
       ),
       body: Consumer<MovieProvider>(
         builder: (context, movieProvider, child) {
-          if (movieProvider.wishlist.isEmpty) {
+          final wishlist = movieProvider.wishlist;
+          
+          if (wishlist.isEmpty) {
             return const Center(
-              child: Text('Ваш список избранного пуст.'),
+              child: Text('В избранном пока ничего нет'),
             );
           }
+
           return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: movieProvider.wishlist.length,
+            itemCount: wishlist.length,
             itemBuilder: (context, index) {
-              final movie = movieProvider.wishlist[index];
-              return Card(
-                margin: const EdgeInsets.only(bottom: 10),
-                child: ListTile(
-                  leading: movie.posterPath.isNotEmpty
-                      ? Image.network(
-                          movie.posterPath,
-                          width: 50,
-                          height: 75,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) =>
-                              const Icon(Icons.broken_image),
-                        )
-                      : const Icon(Icons.movie),
-                  title: Text(movie.title),
-                  subtitle: Text('Год: ${movie.year}'),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () {
-                      movieProvider.removeFromWishlist(movie);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Фильм "${movie.title}" удален из избранного'),
-                        ),
-                      );
-                    },
-                  ),
+              final movie = wishlist[index];
+              return ListTile(
+                leading: movie.poster.isNotEmpty
+                    ? Image.network(
+                        movie.poster,
+                        width: 50,
+                        height: 75,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return const Icon(Icons.movie);
+                        },
+                      )
+                    : const Icon(Icons.movie),
+                title: Text(movie.title),
+                subtitle: Text(movie.year),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete),
+                  onPressed: () => movieProvider.toggleWishlist(movie),
                 ),
+                onTap: () {
+                  // TODO: Добавить навигацию к деталям фильма
+                },
               );
             },
           );

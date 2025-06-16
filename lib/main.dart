@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:film_match_app/providers/auth_provider.dart';
 import 'package:film_match_app/providers/movie_provider.dart';
 import 'package:film_match_app/screens/home_screen.dart';
 import 'package:film_match_app/screens/login_screen.dart';
+import 'package:film_match_app/screens/splash_screen.dart';
 import 'package:film_match_app/services/deep_link_service.dart';
 import 'package:film_match_app/services/navigation_service.dart';
 import 'package:film_match_app/firebase_options.dart';
@@ -16,6 +18,8 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
   
+  final prefs = await SharedPreferences.getInstance();
+  
   // Инициализация сервисов
   final navigationService = NavigationService();
   DeepLinkService? deepLinkService; // Сделаем null-able
@@ -25,7 +29,15 @@ void main() async {
     deepLinkService = DeepLinkService(navigationService);
   }
   
-  runApp(const MyApp());
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => MovieProvider(prefs)),
+      ],
+      child: const MyApp(),
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {
@@ -33,35 +45,13 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => AuthProvider()),
-        ChangeNotifierProvider(create: (_) => MovieProvider()),
-      ],
-      child: MaterialApp(
-        navigatorKey: NavigationService().navigatorKey,
-        title: 'FilmMatch',
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-          useMaterial3: true,
-        ),
-        home: Consumer<AuthProvider>(
-          builder: (context, authProvider, _) {
-            return StreamBuilder(
-              stream: authProvider.authStateChanges,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasData) {
-                  return const HomeScreen();
-                }
-                return const LoginScreen();
-              },
-            );
-          },
-        ),
+    return MaterialApp(
+      title: 'Film Match',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
       ),
+      home: const SplashScreen(),
     );
   }
 }

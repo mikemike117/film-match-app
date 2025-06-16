@@ -1,44 +1,17 @@
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-
-class Movie {
-  final String id; // OMDb uses imdbID
-  final String title;
-  final String posterPath;
-  final String year; // OMDb includes year in search results
-
-  Movie({
-    required this.id,
-    required this.title,
-    required this.posterPath,
-    required this.year,
-  });
-
-  factory Movie.fromJson(Map<String, dynamic> json) {
-    return Movie(
-      id: json['id']?.toString() ?? json['imdbID']?.toString() ?? '',
-      title: json['title']?.toString() ?? json['Title']?.toString() ?? '',
-      posterPath: json['posterPath'] ?? json['Poster'] ?? '',
-      year: json['year']?.toString() ?? json['Year']?.toString() ?? '',
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'title': title,
-      'posterPath': posterPath,
-      'year': year,
-    };
-  }
-}
+import '../models/movie.dart';
+import '../models/movie_details.dart';
+import '../services/movie_cache_service.dart';
 
 class MovieProvider with ChangeNotifier {
   final Dio _dio = Dio();
   final String _baseUrl = 'https://www.omdbapi.com/'; // OMDb API Base URL
   final String _apiKey = 'b5748ebb'; // Replace with your OMDb API Key
   final String _backendUrl = 'http://localhost:8080';
+  final MovieCacheService _cacheService;
   
   List<Movie> _movies = [];
   List<Movie> _wishlist = [];
@@ -46,6 +19,8 @@ class MovieProvider with ChangeNotifier {
   bool _isLoading = false;
   String? _error;
   String? _currentUserId;
+
+  MovieProvider(SharedPreferences prefs) : _cacheService = MovieCacheService(prefs);
 
   List<Movie> get movies => _movies;
   List<Movie> get wishlist => _wishlist;
@@ -67,14 +42,17 @@ class MovieProvider with ChangeNotifier {
     print('MovieProvider: setUserId called with: $_currentUserId');
     if (_currentUserId != null) {
       _initializeMoviesAndWishlist();
+    } else {
+      _movies = [];
+      _wishlist = [];
+      _skippedMovies = [];
+      notifyListeners();
     }
   }
 
   Future<void> _initializeMoviesAndWishlist() async {
     print('MovieProvider: Starting _initializeMoviesAndWishlist...');
     await _loadWishlist();
-    print('MovieProvider: _loadWishlist completed. Skipped movies count: ${_skippedMovies.length}');
-    _skippedMovies.forEach((movie) => print('  Skipped movie: ${movie.title} (${movie.id})'));
     await getPopularMovies();
     print('MovieProvider: _initializeMoviesAndWishlist completed.');
   }
@@ -84,32 +62,50 @@ class MovieProvider with ChangeNotifier {
     if (_currentUserId == null) return;
 
     try {
-      final headers = await _getAuthHeaders();
-      final response = await _dio.get(
-        '$_backendUrl/wishlist/$_currentUserId',
-        options: Options(headers: headers),
-      );
-      if (response.data != null) {
-        final List<dynamic> movieIdsData = response.data['movieIds'] ?? [];
-        _wishlist = movieIdsData.map((data) => Movie.fromJson(data as Map<String, dynamic>)).toList();
+      final prefs = await SharedPreferences.getInstance();
+      final wishlistJson = prefs.getStringList('wishlist_$_currentUserId') ?? [];
+      final skippedJson = prefs.getStringList('skipped_$_currentUserId') ?? [];
 
-        final List<dynamic> skippedMovieIdsData = response.data['skippedMovieIds'] ?? [];
-        _skippedMovies = skippedMovieIdsData.map((data) => Movie.fromJson(data as Map<String, dynamic>)).toList();
-        
-        notifyListeners();
-      }
+      _wishlist = wishlistJson.map((id) => Movie(id: id, title: '', year: '', poster: '')).toList();
+      _skippedMovies = skippedJson.map((id) => Movie(id: id, title: '', year: '', poster: '')).toList();
+
+      // Загружаем детали фильмов из кэша
+      final wishlistDetails = await _cacheService.getCachedMovies(_wishlist.map((m) => m.id).toList());
+      final skippedDetails = await _cacheService.getCachedMovies(_skippedMovies.map((m) => m.id).toList());
+
+      // Обновляем информацию о фильмах
+      _wishlist = wishlistDetails.map((details) => Movie(
+        id: details.id,
+        title: details.title,
+        year: details.year,
+        poster: details.poster,
+      )).toList();
+
+      _skippedMovies = skippedDetails.map((details) => Movie(
+        id: details.id,
+        title: details.title,
+        year: details.year,
+        poster: details.poster,
+      )).toList();
+
+      print('MovieProvider: _loadWishlist completed. Skipped movies count: ${_skippedMovies.length}');
     } catch (e) {
-      print('Error loading wishlist/skipped movies: $e');
-      _error = 'Failed to load wishlist/skipped movies: $e';
-      notifyListeners();
+      print('MovieProvider: Error loading wishlist: $e');
+      _error = 'Failed to load wishlist: $e';
     }
   }
 
   Future<void> searchMovies(String query) async {
+    if (query.isEmpty) {
+      await getPopularMovies();
+      return;
+    }
+
     try {
       _isLoading = true;
       _error = null;
       notifyListeners();
+
       final response = await _dio.get(
         _baseUrl,
         queryParameters: {
@@ -123,25 +119,65 @@ class MovieProvider with ChangeNotifier {
         List<Movie> fetchedMovies = (response.data['Search'] as List)
             .map((movie) => Movie.fromJson(movie))
             .toList();
-        
-        print('MovieProvider: searchMovies fetched ${fetchedMovies.length} movies.');
-        fetchedMovies.forEach((movie) => print('  Fetched movie: ${movie.title} (${movie.id})'));
 
-        _movies = fetchedMovies.where((movie) => !_skippedMovies.any((skipped) => skipped.id == movie.id)).toList();
+        // Загружаем детали фильмов из кэша или API
+        final moviesWithDetails = await Future.wait(
+          fetchedMovies.map((movie) => _getMovieDetails(movie))
+        );
 
-        print('MovieProvider: searchMovies after filtering, _movies count: ${_movies.length}');
-        _movies.forEach((movie) => print('  Filtered movie: ${movie.title} (${movie.id})'));
-
+        _movies = moviesWithDetails.where((movie) => 
+          !_skippedMovies.any((skipped) => skipped.id == movie.id)
+        ).toList();
       } else {
         _movies = [];
-        _error = response.data['Error'] ?? 'Unknown error occurred.';
+        _error = response.data['Error'] ?? 'No movies found.';
       }
     } catch (e) {
-      _error = 'Failed to load movies: $e';
+      _error = 'Failed to search movies: $e';
     } finally {
       _isLoading = false;
       notifyListeners();
     }
+  }
+
+  Future<Movie> _getMovieDetails(Movie movie) async {
+    // Сначала проверяем кэш
+    final cachedMovie = await _cacheService.getCachedMovie(movie.id);
+    if (cachedMovie != null) {
+      return Movie(
+        id: cachedMovie.id,
+        title: cachedMovie.title,
+        year: cachedMovie.year,
+        poster: cachedMovie.poster,
+      );
+    }
+
+    // Если в кэше нет, запрашиваем из API
+    try {
+      final response = await _dio.get(
+        _baseUrl,
+        queryParameters: {
+          'i': movie.id,
+          'apikey': _apiKey,
+        },
+      );
+
+      if (response.data['Response'] == 'True') {
+        final details = MovieDetails.fromJson(response.data);
+        await _cacheService.cacheMovie(details);
+        return Movie(
+          id: details.id,
+          title: details.title,
+          year: details.year,
+          poster: details.poster,
+        );
+      }
+    } catch (e) {
+      print('Error fetching movie details: $e');
+    }
+
+    // Если API недоступен, возвращаем базовую информацию
+    return movie;
   }
 
   Future<void> getPopularMovies() async {
@@ -167,7 +203,14 @@ class MovieProvider with ChangeNotifier {
         print('MovieProvider: getPopularMovies fetched ${fetchedMovies.length} movies.');
         fetchedMovies.forEach((movie) => print('  Fetched movie: ${movie.title} (${movie.id})'));
 
-        _movies = fetchedMovies.where((movie) => !_skippedMovies.any((skipped) => skipped.id == movie.id)).toList();
+        // Загружаем детали фильмов из кэша или API
+        final moviesWithDetails = await Future.wait(
+          fetchedMovies.map((movie) => _getMovieDetails(movie))
+        );
+
+        _movies = moviesWithDetails.where((movie) => 
+          !_skippedMovies.any((skipped) => skipped.id == movie.id)
+        ).toList();
 
         print('MovieProvider: getPopularMovies after filtering, _movies count: ${_movies.length}');
         _movies.forEach((movie) => print('  Filtered movie: ${movie.title} (${movie.id})'));
@@ -184,140 +227,81 @@ class MovieProvider with ChangeNotifier {
     }
   }
 
-  Future<void> addToWishlist(Movie movie) async {
-    print('MovieProvider: addToWishlist called. Current UserId: $_currentUserId');
-    if (_currentUserId == null) {
-      _error = 'User not logged in';
-      notifyListeners();
-      return;
-    }
+  Future<void> toggleWishlist(Movie movie) async {
+    if (_currentUserId == null) return;
 
-    try {
-      final headers = await _getAuthHeaders();
-      await _dio.post(
-        '$_backendUrl/wishlist/$_currentUserId',
-        data: movie.toJson(),
-        options: Options(headers: headers),
-      );
-      
-      if (!_wishlist.any((m) => m.id == movie.id)) {
-        _wishlist.add(movie);
-        notifyListeners();
-      }
-    } catch (e) {
-      _error = 'Failed to add movie to wishlist: $e';
-      notifyListeners();
-    }
-  }
+    final prefs = await SharedPreferences.getInstance();
+    final wishlistJson = prefs.getStringList('wishlist_$_currentUserId') ?? [];
 
-  Future<void> removeFromWishlist(Movie movie) async {
-    print('MovieProvider: removeFromWishlist called. Current UserId: $_currentUserId');
-    if (_currentUserId == null) {
-      _error = 'User not logged in';
-      notifyListeners();
-      return;
-    }
-
-    try {
-      final headers = await _getAuthHeaders();
-      await _dio.delete(
-        '$_backendUrl/wishlist/$_currentUserId/${movie.id}',
-        options: Options(headers: headers),
-      );
-      
+    if (wishlistJson.contains(movie.id)) {
+      wishlistJson.remove(movie.id);
       _wishlist.removeWhere((m) => m.id == movie.id);
-      notifyListeners();
-    } catch (e) {
-      _error = 'Failed to remove movie from wishlist: $e';
-      notifyListeners();
+    } else {
+      wishlistJson.add(movie.id);
+      _wishlist.add(movie);
     }
+
+    await prefs.setStringList('wishlist_$_currentUserId', wishlistJson);
+    notifyListeners();
   }
 
   Future<void> skipMovie(Movie movie) async {
-    print('MovieProvider: skipMovie called. Current UserId: $_currentUserId');
-    if (_currentUserId == null) {
-      _error = 'User not logged in';
-      notifyListeners();
-      return;
-    }
+    if (_currentUserId == null) return;
 
-    try {
-      final headers = await _getAuthHeaders();
-      await _dio.post(
-        '$_backendUrl/skipped/$_currentUserId',
-        data: movie.toJson(),
-        options: Options(headers: headers),
-      );
-      
-      _movies.removeWhere((m) => m.id == movie.id);
+    final prefs = await SharedPreferences.getInstance();
+    final skippedJson = prefs.getStringList('skipped_$_currentUserId') ?? [];
+
+    if (!skippedJson.contains(movie.id)) {
+      skippedJson.add(movie.id);
       _skippedMovies.add(movie);
-      notifyListeners();
-    } catch (e) {
-      _error = 'Failed to skip movie: $e';
+      _movies.removeWhere((m) => m.id == movie.id);
+      await prefs.setStringList('skipped_$_currentUserId', skippedJson);
       notifyListeners();
     }
   }
 
   Future<Movie?> undoSkipMovie() async {
-    print('MovieProvider: undoSkipMovie called. Current UserId: $_currentUserId');
+    if (_currentUserId == null) return null;
     if (_skippedMovies.isEmpty) return null;
-    if (_currentUserId == null) {
-      _error = 'User not logged in';
-      notifyListeners();
-      return null;
-    }
 
     final movieToUndo = _skippedMovies.last;
+    final prefs = await SharedPreferences.getInstance();
+    final skippedJson = prefs.getStringList('skipped_$_currentUserId') ?? [];
 
-    try {
-      final headers = await _getAuthHeaders();
-      await _dio.delete(
-        '$_backendUrl/skipped/$_currentUserId/${movieToUndo.id}',
-        options: Options(headers: headers),
-      );
-      
+    if (skippedJson.contains(movieToUndo.id)) {
+      skippedJson.remove(movieToUndo.id);
       _skippedMovies.removeLast();
       _movies.insert(0, movieToUndo);
+      await prefs.setStringList('skipped_$_currentUserId', skippedJson);
       notifyListeners();
       return movieToUndo;
-    } catch (e) {
-      _error = 'Failed to undo skipped movie: $e';
-      notifyListeners();
-      return null;
     }
+    return null;
   }
 
   Future<void> undoAllSkippedMovies() async {
-    print('MovieProvider: undoAllSkippedMovies called. Current UserId: $_currentUserId');
-    if (_skippedMovies.isEmpty) {
-      print('MovieProvider: No skipped movies to undo.');
-      return;
-    }
-    if (_currentUserId == null) {
-      _error = 'User not logged in';
-      notifyListeners();
-      return;
-    }
+    if (_currentUserId == null) return;
+    if (_skippedMovies.isEmpty) return;
 
-    try {
-      final headers = await _getAuthHeaders();
-      await _dio.delete(
-        '$_backendUrl/skipped/$_currentUserId/all',
-        options: Options(headers: headers),
-      );
-      
-      _movies.insertAll(0, _skippedMovies);
-      _skippedMovies.clear();
-      notifyListeners();
-      print('MovieProvider: Successfully unskipped all movies.');
-    } catch (e) {
-      _error = 'Failed to undo all skipped movies: $e';
-      notifyListeners();
-      print('MovieProvider: Error undoing all skipped movies: $e');
-    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('skipped_$_currentUserId');
+    
+    _movies.insertAll(0, _skippedMovies);
+    _skippedMovies.clear();
+    notifyListeners();
   }
 
-  bool isInWishlist(Movie movie) {
-    return _wishlist.any((m) => m.id == movie.id);
+  Future<void> returnMovie(Movie movie) async {
+    if (_currentUserId == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final skippedJson = prefs.getStringList('skipped_$_currentUserId') ?? [];
+
+    if (skippedJson.contains(movie.id)) {
+      skippedJson.remove(movie.id);
+      _skippedMovies.removeWhere((m) => m.id == movie.id);
+      await prefs.setStringList('skipped_$_currentUserId', skippedJson);
+      notifyListeners();
+    }
   }
 } 
